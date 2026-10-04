@@ -1,0 +1,9 @@
+env/
+venv/
+__pycache__/
+*.pyc
+.vscode/
+# competition data (not redistributable)
+dengue_features_*.csv
+dengue_labels_*.csv
+submission_format.csv

@@ -160,3 +160,58 @@ for c, (g, F) in city_data.items():
     m.fit(F.fillna(F.median()), g["total_cases"].values)
     s = pd.Series(m.feature_importances_, index=F.columns).sort_values(ascending=False)
     print(f"\n{c}: top features\n", s.head(8).round(3))
+
+
+    # ===== STEP 4: ablation + 6 rolling folds (paste at the END of dengue.py, after Step 3) =====
+SPLIT = dict(n_splits=6, test_size=52)
+cols_all = list(city_data["iq"][1].columns)
+sets = {
+    "season_only": ["wk_sin", "wk_cos"],
+    "no_ndvi": [c for c in cols_all if "ndvi" not in c],
+    "full": cols_all,
+}
+specs = [("RF_log", "season_only"), ("RF_log", "no_ndvi"), ("RF_log", "full"),
+         ("GBR_mae", "no_ndvi"), ("GBR_mae", "full")]
+
+res, last = {}, {}
+for c, (g, F) in city_data.items():
+    for k, (tr, te) in enumerate(TimeSeriesSplit(**SPLIT).split(g)):
+        train, test = g.iloc[tr], g.iloc[te]
+        ytr, yte = train["total_cases"].values, test["total_cases"].values
+        base = baseline_preds(train, test)
+        preds = {"const_median": base["const_median"],
+                 "week_median_smooth": base["week_median_smooth"]}
+        for mname, sname in specs:
+            cols = sets[sname]
+            med = F.iloc[tr][cols].median()
+            Xtr, Xte = F.iloc[tr][cols].fillna(med), F.iloc[te][cols].fillna(med)
+            m, use_log = make_models()[mname]
+            m.fit(Xtr, np.log1p(ytr) if use_log else ytr)
+            p = m.predict(Xte)
+            preds[f"{mname}|{sname}"] = np.clip(np.expm1(p) if use_log else p, 0, None)
+        preds["blend (RF_log full + week median)"] = (
+            0.5 * preds["RF_log|full"] + 0.5 * preds["week_median_smooth"])
+        for n, p in preds.items():
+            res.setdefault((c, n), []).append(np.abs(yte - p).mean())
+        if k == SPLIT["n_splits"] - 1:
+            last[c] = (test["week_start_date"].values, yte, preds)
+
+rows = []
+for (c, n), v in res.items():
+    ref = res[(c, "week_median_smooth")]
+    rows.append({"city": c, "model": n, "mean_mae": round(np.mean(v), 2),
+                 "median_mae": round(np.median(v), 2),
+                 "beats_week_median_in": f"{sum(a < b for a, b in zip(v, ref))}/{len(v)}"})
+out = pd.DataFrame(rows).sort_values(["city", "mean_mae"])
+print(out.to_string(index=False))
+pd.DataFrame({f"{c}|{n}": v for (c, n), v in res.items()}).T.round(2).to_csv("dengue_cv6.csv")
+
+fig, axes = plt.subplots(2, 1, figsize=(10, 6))
+for ax, (c, (d_, y_, pr)) in zip(axes, last.items()):
+    ax.plot(d_, y_, label="actual", color="k")
+    ax.plot(d_, pr["RF_log|full"], label="RF_log (weather)")
+    ax.plot(d_, pr["week_median_smooth"], label="week-median baseline", linestyle="--")
+    ax.set_title(f"Last 52 weeks held out: {c}")
+    ax.legend()
+plt.tight_layout(); plt.savefig("forecast_vs_actual.png", dpi=130); plt.close()
+print("Saved: dengue_cv6.csv, forecast_vs_actual.png")
